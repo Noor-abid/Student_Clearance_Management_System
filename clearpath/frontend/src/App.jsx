@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
+import api from "./api";
 
 /* ─── FONTS & STYLES ─────────────────────────────────────────────────────── */
 const FONTS = `@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&display=swap');`;
@@ -801,7 +802,7 @@ const NotifPanel = ({ onClose }) => (
 ══════════════════════════════════════════════════════════════════════════════*/
 
 /* ─── LOGIN SCREEN ───────────────────────────────────────────────────────── */
-const LoginScreen = ({ users, onLogin, onGoRegister }) => {
+const LoginScreen = ({ onLogin, onGoRegister }) => {
   const [email,    setEmail]    = useState("");
   const [password, setPassword] = useState("");
   const [showPw,   setShowPw]   = useState(false);
@@ -812,12 +813,9 @@ const LoginScreen = ({ users, onLogin, onGoRegister }) => {
     setError("");
     if (!email.trim() || !password) { setError("Please enter your email and password."); return; }
     setLoading(true);
-    // Simulate network delay
-    await new Promise(r => setTimeout(r, 600));
-    const user = users.find(u => u.email.toLowerCase() === email.trim().toLowerCase() && u.password === password);
+    const err = await onLogin(email.trim().toLowerCase(), password);
     setLoading(false);
-    if (user) { onLogin(user); }
-    else { setError("Invalid email or password. Please try again."); }
+    if (err) setError(err);
   };
 
   const fillDemo = (acc) => { setEmail(acc.email); setPassword(acc.password); setError(""); };
@@ -887,7 +885,7 @@ const LoginScreen = ({ users, onLogin, onGoRegister }) => {
 };
 
 /* ─── REGISTER SCREEN ────────────────────────────────────────────────────── */
-const RegisterScreen = ({ users, onRegister, onGoLogin }) => {
+const RegisterScreen = ({ onRegister, onGoLogin }) => {
   const [f, setF] = useState({ name:"", email:"", studentId:"", program:"", year:"1", password:"", confirm:"" });
   const [showPw, setShowPw] = useState(false);
   const [error,  setError]  = useState("");
@@ -903,23 +901,17 @@ const RegisterScreen = ({ users, onRegister, onGoLogin }) => {
     if (!f.program.trim())   { setError("Programme of study is required."); return; }
     if (f.password.length < 6) { setError("Password must be at least 6 characters."); return; }
     if (f.password !== f.confirm) { setError("Passwords do not match."); return; }
-    if (users.find(u=>u.email.toLowerCase()===f.email.trim().toLowerCase())) { setError("An account with this email already exists."); return; }
-    if (users.find(u=>u.studentId&&u.studentId.toLowerCase()===f.studentId.trim().toLowerCase())) { setError("This Student ID is already registered."); return; }
-
     setLoading(true);
-    await new Promise(r=>setTimeout(r,700));
-    setLoading(false);
-
-    onRegister({
-      id: `USR-${Date.now()}`,
+    const err = await onRegister({
       email: f.email.trim().toLowerCase(),
       password: f.password,
-      role: "student",
       name: f.name.trim(),
       studentId: f.studentId.trim().toUpperCase(),
       program: f.program.trim(),
       year: f.year,
     });
+    setLoading(false);
+    if (err) setError(err);
   };
 
   return (
@@ -1233,11 +1225,7 @@ const DeptView = ({ user, requests, setRequests }) => {
   const done  = requests.filter(r=>r.depts[DEPT]!=="pending");
 
   const act = (reqId, action) => {
-    setRequests(prev=>prev.map(r=>{
-      if(r.id!==reqId) return r;
-      const nd={...r.depts,[DEPT]:action};
-      return {...r,depts:nd,status:recompute(nd)};
-    }));
+    setRequests({ _apiAction: true, reqId, dept: DEPT, action });
   };
 
   return (
@@ -1313,11 +1301,7 @@ const FinanceView = ({ requests, setRequests }) => {
   const total = appr.reduce((s,r)=>s+getFee(r.id),0);
 
   const act = (reqId, action) => {
-    setRequests(prev=>prev.map(r=>{
-      if(r.id!==reqId) return r;
-      const nd={...r.depts,[DEPT]:action};
-      return {...r,depts:nd,status:recompute(nd)};
-    }));
+    setRequests({ _apiAction: true, reqId, dept: DEPT, action });
   };
 
   return (
@@ -1399,25 +1383,29 @@ const FinanceView = ({ requests, setRequests }) => {
    ROOT APP
 ══════════════════════════════════════════════════════════════════════════════*/
 export default function App() {
-  // ── Persistent State ──
-  const [users,    setUsers]    = useState(() => LS.get("cp_users")    || SEED_USERS);
-  const [requests, setRequests] = useState(() => LS.get("cp_requests") || SEED_REQUESTS);
-  const [session,  setSession]  = useState(() => LS.get("cp_session")  || null); // { userId }
+  // ── State ──
+  const [currentUser, setCurrentUser] = useState(() => LS.get("cp_current_user") || null);
+  const [requests,    setRequests]    = useState([]);
 
   // ── UI State ──
-  const [authScreen, setAuthScreen] = useState("login"); // "login" | "register"
+  const [authScreen, setAuthScreen] = useState("login");
   const [modal,      setModal]      = useState(null);
   const [cert,       setCert]       = useState(null);
   const [toast,      setToast]      = useState(null);
   const [notif,      setNotif]      = useState(false);
   const [showProfile,setShowProfile]= useState(false);
 
-  // ── Persist on change ──
-  useEffect(() => { LS.set("cp_users",    users);    }, [users]);
-  useEffect(() => { LS.set("cp_requests", requests); }, [requests]);
-  useEffect(() => { LS.set("cp_session",  session);  }, [session]);
+  // ── Persist session ──
+  useEffect(() => { LS.set("cp_current_user", currentUser); }, [currentUser]);
 
-  const currentUser = session ? users.find(u => u.id === session.userId) : null;
+  // ── Load requests from backend when logged in ──
+  useEffect(() => {
+    if (currentUser) {
+      api.getRequests().then(data => {
+        if (Array.isArray(data)) setRequests(data);
+      });
+    }
+  }, [currentUser]);
 
   const showToast = useCallback((msg, color="var(--green)") => {
     setToast({ msg, color });
@@ -1425,37 +1413,41 @@ export default function App() {
   }, []);
 
   /* ── Auth handlers ── */
-  const handleLogin = (user) => {
-    setSession({ userId: user.id });
+  const handleLogin = async (emailVal, passwordVal) => {
+    const user = await api.login(emailVal, passwordVal);
+    if (user.error) return user.error;
+    setCurrentUser(user);
     showToast(`Welcome back, ${user.name.split(" ")[0]}! 👋`);
+    return null;
   };
 
-  const handleRegister = (newUser) => {
-    setUsers(prev => [...prev, newUser]);
-    setSession({ userId: newUser.id });
-    showToast(`Account created! Welcome, ${newUser.name.split(" ")[0]}! 🎉`);
+  const handleRegister = async (data) => {
+    const user = await api.register(data);
+    if (user.error) return user.error;
+    setCurrentUser(user);
+    showToast(`Account created! Welcome, ${user.name.split(" ")[0]}! 🎉`);
+    return null;
   };
 
   const handleSignOut = () => {
-    setSession(null);
+    setCurrentUser(null);
+    setRequests([]);
     setAuthScreen("login");
     setModal(null);
+    LS.del("cp_current_user");
     showToast("Signed out successfully");
   };
 
   const handleChangePassword = (current, next) => {
     if (!currentUser || currentUser.password !== current) return false;
-    setUsers(prev => prev.map(u => u.id === currentUser.id ? { ...u, password: next } : u));
+    setCurrentUser(prev => ({ ...prev, password: next }));
     return true;
   };
 
   /* ── Request handlers ── */
-  const handleNewRequest = (f) => {
+  const handleNewRequest = async (f) => {
     if (!currentUser) return;
-    const id = `CLR-${new Date().getFullYear()}-${String(requests.length + 1).padStart(3,"0")}`;
-    FEES_MAP[id] = 8400 + ((requests.length * 613) % 2200);
-    setRequests(prev => [...prev, {
-      id,
+    await api.createRequest({
       studentId: currentUser.studentId,
       student:   currentUser.name,
       program:   f.program,
@@ -1463,21 +1455,30 @@ export default function App() {
       session:   f.session,
       reason:    f.reason,
       notes:     f.notes,
-      status:    "pending",
-      submitted: todayStr(),
-      depts: { library:"pending", finance:"pending", hostel:"pending", academic:"pending", ict:"pending" },
-    }]);
-    showToast("✅ Request submitted to all departments");
+    });
+    const updated = await api.getRequests();
+    if (Array.isArray(updated)) setRequests(updated);
+    showToast("✅ Request submitted — Admin notified by email!");
   };
 
-  const wrapRequests = useCallback((updater) => {
-    setRequests(updater);
-    showToast("Changes saved");
-  }, [showToast]);
+  const wrapRequests = useCallback(async (updater) => {
+    if (updater && updater._apiAction) {
+      const { reqId, dept, action } = updater;
+      await api.deptAction(reqId, dept, action, currentUser?.name || "Officer");
+      const updated = await api.getRequests();
+      if (Array.isArray(updated)) setRequests(updated);
+      showToast("✅ Action saved — Student notified by email!");
+    } else {
+      setRequests(updater);
+      showToast("Changes saved");
+    }
+  }, [showToast, currentUser]);
 
-  const handleReset = () => {
+  const handleReset = async () => {
     if (!window.confirm("Reset all clearance data to default? User accounts will be kept.")) return;
-    setRequests(SEED_REQUESTS);
+    await api.resetData();
+    const updated = await api.getRequests();
+    if (Array.isArray(updated)) setRequests(updated);
     showToast("Clearance data reset", "var(--yellow)");
   };
 
@@ -1487,8 +1488,8 @@ export default function App() {
       <>
         <style>{FONTS}{STYLES}</style>
         {authScreen === "login"
-          ? <LoginScreen    users={users} onLogin={handleLogin} onGoRegister={()=>setAuthScreen("register")}/>
-          : <RegisterScreen users={users} onRegister={handleRegister} onGoLogin={()=>setAuthScreen("login")}/>
+          ? <LoginScreen    onLogin={handleLogin} onGoRegister={()=>setAuthScreen("register")}/>
+          : <RegisterScreen onRegister={handleRegister} onGoLogin={()=>setAuthScreen("login")}/>
         }
         {toast && <div className="toast" style={{borderLeft:`3px solid ${toast.color}`,color:toast.color}}>{toast.msg}</div>}
       </>
